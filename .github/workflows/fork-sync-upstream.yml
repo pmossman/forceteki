@@ -2,6 +2,7 @@
 # Policy and manual steps: FORK.md, "Sync policy".
 #
 #   merge    fetch upstream, fast-forward the `main` mirror, check the fork layer, merge upstream/main into tools
+#   card-data  fetch FFG card data once per card-data version (retried) and cache it for the test jobs
 #   verify   rebuild the same merge commit in each job and run upstream's own CI checks on it
 #   repair   DISABLED STUB for the code factory (never runs)
 #   publish  green: fast-forward `tools` to the tested merge commit
@@ -115,9 +116,67 @@ jobs:
             { echo "Merge of upstream ${upstream_sha:0:9} into tools ${tools_sha:0:9} has conflicts:"; echo '```'; echo "$out"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
+  # Card data comes from FFG's public card API (npm run get-cards), fetched once per card-data version and cached,
+  # so the parallel test jobs don't each hit the API.
+  card-data:
+    name: Card data
+    needs: merge
+    if: needs.merge.outputs.status == 'merged'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.merge.outputs.upstream_sha }}
+          persist-credentials: false
+
+      - id: key
+        run: echo "key=fork-card-data-${{ hashFiles('card-data-version.txt', 'scripts/fetchdata.js', 'scripts/mockdata.js') }}" >> "$GITHUB_OUTPUT"
+
+      - id: lookup
+        uses: actions/cache/restore@v5
+        with:
+          path: ./test/json
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+
+      - if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - if: steps.lookup.outputs.cache-hit != 'true'
+        run: npm install --no-audit --no-fund
+
+      - name: Fetch card data (retried; the API sometimes returns 5xx)
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: |
+          for attempt in 1 2 3; do
+            start=$(date +%s)
+            if npm run get-cards; then
+              echo "get-cards took $(( $(date +%s) - start ))s (attempt $attempt)" | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "::warning::get-cards attempt $attempt failed after $(( $(date +%s) - start ))s"
+            sleep $(( attempt * 60 ))
+          done
+          exit 1
+
+      - if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ./test/json
+          key: ${{ steps.key.outputs.key }}
+
   verify:
     name: verify (${{ matrix.check }})
-    needs: merge
+    needs: [merge, card-data]
     if: needs.merge.outputs.status == 'merged'
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -148,17 +207,13 @@ jobs:
 
       - run: npm install --no-audit --no-fund
 
-      - name: Cache card data
+      - name: Restore card data
         if: matrix.check == 'test' || matrix.check == 'test-undo'
-        id: card-cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ./test/json
-          key: fork-card-data-${{ hashFiles('card-data-version.txt', 'scripts/fetchdata.js', 'scripts/mockdata.js') }}
-
-      - name: Fetch card data
-        if: (matrix.check == 'test' || matrix.check == 'test-undo') && steps.card-cache.outputs.cache-hit != 'true'
-        run: npm run get-cards
+          key: ${{ needs.card-data.outputs.key }}
+          fail-on-cache-miss: true
 
       - name: Run ${{ matrix.check }}
         run: |
@@ -256,7 +311,7 @@ jobs:
 
   report:
     name: Report a sync that needs attention
-    needs: [merge, verify, publish]
+    needs: [merge, card-data, verify, publish]
     if: >-
       always() && (
         needs.merge.result != 'success' ||
@@ -321,7 +376,7 @@ jobs:
             echo
             echo "- Run: ${run_url}"
             echo "- Upstream: \`${UPSTREAM_REPO}@${upstream_sha:0:9}\` (ref \`${UPSTREAM_REF}\`); tools before: \`${tools_sha:0:9}\`"
-            echo "- Merge: **${status:-merge job failed}**; verify: **${{ needs.verify.result }}**; publish: **${{ needs.publish.result }}**"
+            echo "- Merge: **${status:-merge job failed}**; card data: **${{ needs.card-data.result }}**; verify: **${{ needs.verify.result }}**; publish: **${{ needs.publish.result }}**"
             if [ "$pushed" = yes ]; then echo "- Sync branch: \`${branch}\`"; fi
             if [ -n "$wf" ]; then
               echo "- Upstream changed workflow files (\`${wf}\`), which GITHUB_TOKEN may not push. If verify is green, publish by hand:"

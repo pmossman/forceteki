@@ -45,7 +45,8 @@ and report only in the run summary.
    tested.
 5. Run upstream's own CI checks on the merge commit, in parallel jobs: `eslint`, `validate-cards`,
    `test-parallel` and `test-parallel-undo`. A test job that fails is re-run once without rebuilding; a pass on the
-   retry counts as green and the flaky specs are listed as a warning.
+   retry counts as green and the flaky specs are listed as a warning. Card data for the tests is fetched once per
+   card-data version from FFG's card API (`npm run get-cards`, up to three attempts) and cached.
 6. All green: fast-forward `tools` to the merge commit. This is a plain push, rejected if `tools` moved meanwhile.
 7. Anything else (conflict, red check, rejected push): push the attempt as `sync/<date>-run<N>`, with conflict markers
    committed as-is if it conflicted, then open an issue titled `[fork-sync] upstream sync needs attention` (or comment
