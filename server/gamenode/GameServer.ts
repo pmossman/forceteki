@@ -68,6 +68,7 @@ import type { IScheduledTask, IScheduler } from '../utils/IScheduler';
 import { RealScheduler } from '../utils/RealScheduler';
 import type { IGameNodeConfig } from './GameNodeConfig';
 import { buildGameNodeConfigFromEnvironment } from './GameNodeConfig';
+import { attachSandbox } from '../sandbox/adapters/SandboxNodeAdapter';
 
 /**
  * Represents additional Socket types we can leverage these later.
@@ -374,6 +375,12 @@ export class GameServer {
                 methods: ['GET', 'POST']
             }
         });
+
+        // [board-editor fork hook] sandbox HTTP routes + socket.io namespace (/sandbox). Dev only: it builds boards
+        // with the test harness, which only exists when ENVIRONMENT=development. See server/sandbox/.
+        if (testGameBuilder) {
+            attachSandbox(app, this.io, { cardDataGetter, testGameBuilder });
+        }
 
         // Setup Socket.IO middleware for Next-auth token verification
         this.io.use(async (socket, next) => {
