@@ -52,7 +52,7 @@ export class SandboxTree {
         return parent?.children.map((id) => this.nodes.get(id)).find((child) => inputsEqual(child.input, input));
     }
 
-    public addChild(parentId: string, props: { kind: SandboxNodeKind; seat: Seat; input: ISandboxInput; label: string; promptTitle?: string }, id?: string): ISandboxTreeNode {
+    public addChild(parentId: string, props: { kind: SandboxNodeKind; seat: Seat; input: ISandboxInput; label: string; promptTitle?: string; logIndex?: number }, id?: string): ISandboxTreeNode {
         const parent = this.nodes.get(parentId);
         if (!parent) {
             throw new Error(`Unknown parent node ${parentId}`);
@@ -77,6 +77,9 @@ export class SandboxTree {
         };
         if (props.promptTitle) {
             node.promptTitle = props.promptTitle;
+        }
+        if (props.logIndex != null) {
+            node.logIndex = props.logIndex;
         }
         this.nodes.set(nodeId, node);
         parent.children.push(nodeId);
@@ -162,7 +165,8 @@ export class SandboxTree {
                 input: node.input ?? null,
                 label: node.label,
                 kind: node.kind,
-                ...(node.promptTitle ? { promptTitle: node.promptTitle } : {})
+                ...(node.promptTitle ? { promptTitle: node.promptTitle } : {}),
+                ...(node.logIndex != null ? { logIndex: node.logIndex } : {})
             });
             node.children.forEach(visit);
         };
@@ -185,6 +189,7 @@ export class SandboxTree {
                 input: node.input,
                 label: node.label,
                 promptTitle: node.promptTitle,
+                logIndex: node.logIndex,
             }, node.id);
         }
         return tree;

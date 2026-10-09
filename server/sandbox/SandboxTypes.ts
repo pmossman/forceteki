@@ -158,6 +158,9 @@ export interface ISandboxTreeNode {
     promptTitle?: string;
     actionNumber: number;
     ply: number;
+
+    /** length of the game log right after this node's input: log.slice(parent.logIndex, node.logIndex) is what it did */
+    logIndex?: number;
 }
 
 export interface ISandboxTree {
@@ -173,6 +176,7 @@ export interface ISerializedTreeNode {
     label: string;
     kind: string;
     promptTitle?: string;
+    logIndex?: number;
 }
 
 export interface ISerializedTree {

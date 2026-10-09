@@ -180,7 +180,8 @@ function buildItem(context: any, id: string, status: IStackItem['status']): ISta
         controller: seatOf(context.player) ?? seatOf(source?.controller) ?? 'p1',
         status,
         optional: !!context.ability?.optional,
-        hasLegalEffects: status === 'resolved' ? true : hasLegalEffects(context),
+        // once chosen, an ability's "legal effects" are moot (e.g. Plot's card has already left the resource zone)
+        hasLegalEffects: status === 'pending' ? hasLegalEffects(context) : true,
     };
     if (source && hiddenZones.has(source.zoneName) && status !== 'resolved') {
         item.fromHiddenZone = true;

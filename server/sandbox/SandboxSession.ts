@@ -197,6 +197,7 @@ export class SandboxSession implements ISandboxRouter {
         this.rootText = resolved.canonicalText;
         this.seed = rootSeed;
         this.tree = tree ?? new SandboxTree();
+        this.tree.root.logIndex = ((game as any).messages ?? []).length;
         this.currentNodeId = SandboxTree.rootId;
 
         if (targetNode !== SandboxTree.rootId) {
@@ -338,7 +339,10 @@ export class SandboxSession implements ISandboxRouter {
             case 'menuButton': {
                 const button = (state.buttons ?? []).find((b: any) => String(b.arg) === String(input.args[0]));
                 const text = button ? cleanTokenText(button.text) : String(input.args[0]);
-                label = `${who}: ${text}`;
+                // short generic answers ("Trigger", "Pass", "You", "Done") say what they answered
+                const context = cleanTokenText(state.promptTitle ?? '');
+                const generic = text.split(/\s+/).length <= 2 && context && !inActionWindow && context !== text;
+                label = generic ? `${who}: ${text} (${context})` : `${who}: ${text}`;
                 break;
             }
             case 'perCardMenuButton': {
@@ -401,6 +405,7 @@ export class SandboxSession implements ISandboxRouter {
             input: recorded,
             label: description.label,
             promptTitle: description.promptTitle || undefined,
+            logIndex: ((game as any).messages ?? []).length,
         });
         this.currentNodeId = node.id;
         return { ok: true, snapshot: this.emit(this.buildSnapshot()), nodeId: node.id, reusedExistingNode: !!existing };
