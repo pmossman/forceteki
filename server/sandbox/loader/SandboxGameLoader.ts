@@ -62,8 +62,28 @@ export class HarnessGameLoader implements ISandboxGameLoader {
         const ctx: any = {};
         builder.attachTestInfoToObj(ctx, wrapper, sandboxPlayerNames.p1, sandboxPlayerNames.p2);
 
+        // The harness ends setup by snapshotting an 'action' timepoint, which reads the action phase's active player.
+        // In the regroup phase there is none (forceteki's own specs never set up a regroup position with undo on), so
+        // that one call would throw. Skip it for regroup positions; every later timepoint snapshots as usual.
+        const snapshots = (wrapper.game as any).snapshotManager;
+        if (setup.phase === 'regroup' && snapshots) {
+            const moveToNextTimepoint = snapshots.moveToNextTimepoint;
+            snapshots.moveToNextTimepoint = function (timepoint: string) {
+                if (timepoint === 'action' && !(wrapper.game as any).actionPhaseActivePlayer) {
+                    return;
+                }
+                return moveToNextTimepoint.call(this, timepoint);
+            };
+        }
+
         // the harness mutates its options object, so always hand it a fresh copy
-        await builder.setupGameStateAsync(ctx, JSON.parse(JSON.stringify(setup)));
+        try {
+            await builder.setupGameStateAsync(ctx, JSON.parse(JSON.stringify(setup)));
+        } finally {
+            if (snapshots && Object.prototype.hasOwnProperty.call(snapshots, 'moveToNextTimepoint')) {
+                delete snapshots.moveToNextTimepoint;
+            }
+        }
 
         const game = wrapper.game;
         let changed = false;
