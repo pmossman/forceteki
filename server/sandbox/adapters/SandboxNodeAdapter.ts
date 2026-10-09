@@ -5,7 +5,8 @@ import type { Server as IOServer, Socket } from 'socket.io';
 import { SandboxCardIndex } from '../cards/SandboxCardIndex';
 import type { ICardDataJson } from '../../utils/cardData/CardDataInterfaces';
 import { HarnessGameLoader } from '../loader/SandboxGameLoader';
-import { SandboxPositions, SandboxSession } from '../SandboxSession';
+import { SandboxPositions } from '../SandboxSession';
+import { SandboxDispatcher, sandboxMethods } from '../SandboxDispatcher';
 import { sandboxPresets } from '../SandboxPresets';
 
 /**
@@ -91,39 +92,17 @@ export function attachSandbox(app: Express, io: IOServer, deps: ISandboxAdapterD
     // ---------------------------------------------------------------- socket.io
     const namespace = io.of('/sandbox');
     namespace.on('connection', (socket: Socket) => {
-        const session = new SandboxSession({ index, loader });
-        const unsubscribe = session.onSnapshot((snapshot) => socket.emit('snapshot', snapshot));
-
-        // one call at a time per session: a goto rebuilds the game asynchronously, and nothing may act on it meanwhile
-        let queue: Promise<unknown> = Promise.resolve();
-        const handle = (event: string, fn: (payload: any) => unknown | Promise<unknown>) => {
-            socket.on(event, (payload: any, ack: unknown) => {
+        // one session per connection; the dispatcher serialises calls and never throws
+        const dispatcher = new SandboxDispatcher({ index, loader });
+        const unsubscribe = dispatcher.onSnapshot((snapshot) => socket.emit('snapshot', snapshot));
+        for (const method of sandboxMethods) {
+            socket.on(method, (payload: any, ack: unknown) => {
                 const reply = safeAck(ack);
-                queue = queue.then(async () => {
-                    try {
-                        reply(await fn(payload ?? {}));
-                    } catch (error) {
-                        reply({ ok: false, error: String((error as Error)?.message ?? error) });
-                    }
-                });
+                void dispatcher.call(method, payload).then(reply);
             });
-        };
-
-        handle('parsePosition', (p) => positions.parse(String(p.text ?? '')));
-        handle('formatPosition', (p) => ({ text: positions.format(p.position) }));
-        handle('validatePosition', (p) => positions.validate({ text: p.text, position: p.position }));
-        handle('load', (p) => session.loadAsync(p));
-        handle('act', (p) => session.actAsync(p));
-        handle('goto', (p) => session.gotoAsync(String(p.nodeId)));
-        handle('deleteNode', (p) => session.deleteNodeAsync(String(p.nodeId)));
-        handle('promoteNode', (p) => session.promoteNodeAsync(String(p.nodeId)));
-        handle('exportPosition', () => (session.isLoaded ? session.exportPosition() : { ok: false, error: 'no session: call load first' }));
-        handle('serializeTree', () => (session.isLoaded ? session.serializeTree() : { ok: false, error: 'no session: call load first' }));
-        handle('getSnapshot', () => (session.isLoaded ? { ok: true, snapshot: session.getSnapshot() } : { ok: false, error: 'no session: call load first' }));
-
+        }
         socket.on('disconnect', () => unsubscribe());
     });
 
-    // eslint-disable-next-line no-console
     console.log(`SANDBOX: ready (${index.entries.length} cards indexed in ${Date.now() - started}ms): HTTP /api/sandbox/*, socket.io namespace /sandbox`);
 }

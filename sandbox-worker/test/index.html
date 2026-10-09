@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>sandbox worker check</title>
+<script type="module">
+import { runScenario } from './scenario.mjs';
+// a minimal client-side Worker adapter: the same method names and payloads as the socket.io events
+window.runSandboxCheck = async () => {
+    const t0 = performance.now();
+    const worker = new Worker('/build/sandbox-worker/sandbox.worker.js');
+    let nextId = 1;
+    const pending = new Map();
+    let snapshots = 0;
+    const booted = new Promise((resolve) => {
+        worker.onmessage = (event) => {
+            const msg = event.data;
+            if (msg.event === 'booted') { resolve(); return; }
+            if (msg.event === 'snapshot') { snapshots++; return; }
+            const p = pending.get(msg.id);
+            pending.delete(msg.id);
+            if (msg.ok) { p.resolve(msg.result); } else { p.reject(new Error(msg.error)); }
+        };
+    });
+    const call = (method, payload) => new Promise((resolve, reject) => {
+        const id = nextId++;
+        pending.set(id, { resolve, reject });
+        worker.postMessage({ id, method, payload });
+    });
+    await booted;
+    const bootMs = performance.now() - t0;
+    const cards = await call('loadCards', { url: '/build/sandbox-worker/cards.json' });
+    const readyMs = performance.now() - t0;
+    const result = await runScenario(call);
+    worker.terminate();
+    return { ...result, bootMs, readyMs, cards, snapshots };
+};
+</script>

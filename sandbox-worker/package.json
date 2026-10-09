@@ -1,0 +1,19 @@
+{
+  "name": "karabast-sandbox-worker",
+  "private": true,
+  "description": "Web Worker / browser build of the forceteki sandbox module (server/sandbox). Build tooling only; kept out of the root package.json so no upstream file changes.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "pack-cards": "node tools/pack-cards.mjs",
+    "test:node": "node test/run-node.mjs",
+    "test:browser": "node test/run-browser.mjs",
+    "test:socket": "node test/run-socket.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "events": "3.3.0",
+    "playwright": "1.60.0",
+    "socket.io-client": "^4.8.4"
+  }
+}
