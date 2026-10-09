@@ -1,0 +1,333 @@
+# Fork layer file, not an upstream file. Keeps `tools` in step with SWU-Karabast/forceteki.
+# Policy and manual steps: FORK.md, "Sync policy".
+#
+#   merge    fetch upstream, fast-forward the `main` mirror, rebuild the merge of upstream/main into tools
+#   verify   rebuild the same merge commit in each job and run upstream's checks plus the fork layer check
+#   repair   DISABLED STUB for the code factory (never runs)
+#   publish  green: fast-forward `tools` to the tested merge commit
+#   report   anything not green: push a sync/<date>-run<N> branch, open or update an issue (or a draft PR), fail the run
+#
+# Needs no secrets. GITHUB_TOKEN cannot push commits that change .github/workflows/*, so a sync that brings in
+# an upstream workflow change is tested here but has to be pushed by hand (the report says how).
+name: fork-sync-upstream
+
+on:
+  schedule:
+    - cron: '23 9 * * *'   # daily, 09:23 UTC
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Update tools and main when green. Off = dry run: test the merge, push nothing.'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: fork-sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: SWU-Karabast/forceteki
+  TOOLS_BRANCH: tools
+  MIRROR_BRANCH: main
+  PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
+
+jobs:
+  merge:
+    name: Fetch upstream and merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      status: ${{ steps.merge.outputs.status }}
+      tools_sha: ${{ steps.merge.outputs.tools_sha }}
+      upstream_sha: ${{ steps.merge.outputs.upstream_sha }}
+      merge_sha: ${{ steps.merge.outputs.merge_sha }}
+      when: ${{ steps.merge.outputs.when }}
+      workflow_files: ${{ steps.merge.outputs.workflow_files }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TOOLS_BRANCH }}
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream main
+
+      - name: Fast-forward the main mirror
+        run: |
+          up=$(git rev-parse upstream/main)
+          mirror=$(git rev-parse "origin/${MIRROR_BRANCH}")
+          if [ "$up" = "$mirror" ]; then
+            echo "${MIRROR_BRANCH} already equals upstream (${up:0:9})"
+          elif ! git merge-base --is-ancestor "$mirror" "$up"; then
+            echo "::error::${MIRROR_BRANCH} has commits upstream does not have. It is left alone; see FORK.md 'Branch model'."
+          elif [ -n "$(git diff --name-only "$mirror" "$up" -- .github/workflows)" ]; then
+            echo "::warning::Upstream changed .github/workflows, which GITHUB_TOKEN may not push. Fast-forward ${MIRROR_BRANCH} by hand: git push origin upstream/main:${MIRROR_BRANCH}"
+          elif [ "$PUBLISH" != "true" ]; then
+            echo "Dry run: would fast-forward ${MIRROR_BRANCH} ${mirror:0:9} -> ${up:0:9}"
+          else
+            git push origin "${up}:refs/heads/${MIRROR_BRANCH}"
+          fi
+
+      - name: Merge upstream/main into tools
+        id: merge
+        run: |
+          tools_sha=$(git rev-parse HEAD)
+          upstream_sha=$(git rev-parse upstream/main)
+          when=$(date -u +%Y-%m-%dT%H:%M:%S+0000)
+          { echo "tools_sha=$tools_sha"; echo "upstream_sha=$upstream_sha"; echo "when=$when"; } >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$upstream_sha" "$tools_sha"; then
+            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+            echo "tools already contains upstream ${upstream_sha:0:9}; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Upstream commits to merge: $(git rev-list --count "$tools_sha..$upstream_sha")"
+          if out=$(bash fork/sync-merge.sh "$tools_sha" "$upstream_sha" "$when"); then
+            echo "status=merged" >> "$GITHUB_OUTPUT"
+            echo "merge_sha=$out" >> "$GITHUB_OUTPUT"
+            wf=$(git diff --name-only "$tools_sha" "$out" -- .github/workflows | tr '\n' ' ')
+            echo "workflow_files=$wf" >> "$GITHUB_OUTPUT"
+            echo "Merged upstream ${upstream_sha:0:9} into tools ${tools_sha:0:9} cleanly: ${out:0:9}" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            { echo "Merge of upstream ${upstream_sha:0:9} into tools ${tools_sha:0:9} has conflicts:"; echo '```'; echo "$out"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fork layer check
+        if: steps.merge.outputs.status == 'merged'
+        run: node fork/check-layer.mjs --upstream upstream/main
+
+  verify:
+    name: verify (${{ matrix.check }})
+    needs: merge
+    if: needs.merge.outputs.status == 'merged'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [lint, validate-cards, test, test-undo]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.merge.outputs.tools_sha }}
+          fetch-depth: 0
+
+      - name: Rebuild the merge commit
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${{ needs.merge.outputs.upstream_sha }}"
+          sha=$(bash fork/sync-merge.sh "${{ needs.merge.outputs.tools_sha }}" "${{ needs.merge.outputs.upstream_sha }}" "${{ needs.merge.outputs.when }}")
+          test "$sha" = "${{ needs.merge.outputs.merge_sha }}" || { echo "::error::rebuilt merge $sha differs from ${{ needs.merge.outputs.merge_sha }}"; exit 1; }
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+          cache: npm
+
+      - run: npm install --no-audit --no-fund
+
+      - name: Cache card data
+        if: matrix.check == 'test' || matrix.check == 'test-undo'
+        id: card-cache
+        uses: actions/cache@v5
+        with:
+          path: ./test/json
+          key: fork-card-data-${{ hashFiles('card-data-version.txt', 'scripts/fetchdata.js', 'scripts/mockdata.js') }}
+
+      - name: Fetch card data
+        if: (matrix.check == 'test' || matrix.check == 'test-undo') && steps.card-cache.outputs.cache-hit != 'true'
+        run: npm run get-cards
+
+      - name: Run ${{ matrix.check }}
+        run: |
+          mkdir -p fork-sync-out
+          log="fork-sync-out/${{ matrix.check }}.log"
+          start=$(date +%s)
+          case "${{ matrix.check }}" in
+            lint)           npx eslint --quiet 2>&1 | tee "$log" ;;
+            validate-cards) npm run validate-cards 2>&1 | tee "$log" ;;
+            test|test-undo)
+              # Retry once without rebuilding, so a single upstream flake doesn't fail the sync.
+              # A spec that fails twice is a real failure; one that passes on retry is reported as flaky.
+              if [ "${{ matrix.check }}" = test ]; then build=test-parallel; rerun=jasmine-parallel; else build=test-parallel-undo; rerun=jasmine-undo-parallel; fi
+              if ! npm run "$build" 2>&1 | tee "$log"; then
+                awk '/^Failures:/{f=1;next} /^Pending:|specs?, /{f=0} f && /^[0-9]+\) /' "$log" > "fork-sync-out/${{ matrix.check }}.first-failures.txt"
+                echo "::warning::${{ matrix.check }} failed once; retrying"
+                npm run "$rerun" 2>&1 | tee "$log"
+                echo "::warning::${{ matrix.check }} passed on retry. Flaky specs: $(tr '\n' ';' < "fork-sync-out/${{ matrix.check }}.first-failures.txt")"
+              fi ;;
+          esac
+          echo "${{ matrix.check }} took $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect failures
+        if: failure()
+        run: |
+          mkdir -p fork-sync-out
+          log="fork-sync-out/${{ matrix.check }}.log"
+          {
+            echo "### ${{ matrix.check }} failed"
+            if grep -q '^Failures:' "$log" 2>/dev/null; then
+              echo '```'; awk '/^Failures:/{f=1;next} /^Pending:|specs?, /{f=0} f && /^[0-9]+\) /' "$log" | head -100; grep -E 'specs?, ' "$log" | tail -1; echo '```'
+            else
+              echo '```'; tail -60 "$log" 2>/dev/null; echo '```'
+            fi
+          } > "fork-sync-out/${{ matrix.check }}.failures.md"
+          cat "fork-sync-out/${{ matrix.check }}.failures.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: failures-${{ matrix.check }}
+          path: fork-sync-out/${{ matrix.check }}.failures.md
+          retention-days: 14
+
+  # -------------------------------------------------------------------------------------------------------------
+  # REPAIR STAGE: DISABLED STUB. The code factory plugs in here; see FORK.md, "Code factory". Not implemented.
+  #   - `if: false` means it never runs. An ANTHROPIC_API_KEY Actions secret exists on this fork (added 2026-10-08),
+  #     but this job stays disabled, and references no secret, until the gates in the code-factory design exist
+  #     (fork tools tests, the browser smoke test, the diff-scope check) and phase A is approved.
+  #   - When built, it will: check out the sync branch, run the repair agent (tools scoped to this checkout,
+  #     iteration and cost caps), re-run `verify`, run `node fork/check-layer.mjs --base <merge> --head <repair>`
+  #     so a repair may only touch the fork layer and registered hook points, and open a PR into tools.
+  #     It never pushes to tools or main.
+  # -------------------------------------------------------------------------------------------------------------
+  repair:
+    name: repair (disabled stub)
+    needs: [merge, verify]
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "The repair stage is a disabled stub." && exit 1
+
+  publish:
+    name: Publish to tools
+    needs: [merge, verify]
+    if: needs.merge.outputs.status == 'merged' && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.merge.outputs.tools_sha }}
+          fetch-depth: 0
+
+      - name: Fast-forward tools to the tested merge commit
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${{ needs.merge.outputs.upstream_sha }}"
+          sha=$(bash fork/sync-merge.sh "${{ needs.merge.outputs.tools_sha }}" "${{ needs.merge.outputs.upstream_sha }}" "${{ needs.merge.outputs.when }}")
+          test "$sha" = "${{ needs.merge.outputs.merge_sha }}"
+          if [ "$PUBLISH" != "true" ]; then
+            echo "Dry run: would fast-forward ${TOOLS_BRANCH} to ${sha:0:9}" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -n "${{ needs.merge.outputs.workflow_files }}" ]; then
+            echo "::error::Tested and green, but the merge changes ${{ needs.merge.outputs.workflow_files }}which GITHUB_TOKEN may not push."
+            exit 1
+          fi
+          # Plain push: a fast-forward of tools, rejected if tools moved during this run. Never forced.
+          git push origin "${sha}:refs/heads/${TOOLS_BRANCH}"
+          echo "tools fast-forwarded to ${sha:0:9} (upstream ${{ needs.merge.outputs.upstream_sha }})" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: Report a sync that needs attention
+    needs: [merge, verify, publish]
+    if: >-
+      always() && (
+        needs.merge.result != 'success' ||
+        needs.merge.outputs.status == 'conflict' ||
+        (needs.merge.outputs.status == 'merged' && (needs.verify.result != 'success' || needs.publish.result != 'success'))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.merge.outputs.tools_sha || env.TOOLS_BRANCH }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: failures-*
+          merge-multiple: true
+          path: fork-sync-out
+
+      - name: Push the sync branch and file the report
+        run: |
+          status="${{ needs.merge.outputs.status }}"
+          tools_sha="${{ needs.merge.outputs.tools_sha }}"
+          upstream_sha="${{ needs.merge.outputs.upstream_sha }}"
+          wf="${{ needs.merge.outputs.workflow_files }}"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          branch="sync/$(date -u +%Y-%m-%d)-run${GITHUB_RUN_NUMBER}"
+          report=fork-sync-out/report.md
+          mkdir -p fork-sync-out
+
+          pushed=no
+          if [ -n "$upstream_sha" ] && [ -n "$tools_sha" ]; then
+            git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+            git fetch --no-tags upstream "$upstream_sha"
+            if conflicts=$(bash fork/sync-merge.sh "$tools_sha" "$upstream_sha" "${{ needs.merge.outputs.when }}"); then
+              conflicts=""
+            else
+              # Commit the conflicted merge as-is (markers included) so a person, or later the repair stage,
+              # can resolve it on the sync branch. It is never published to tools in this state.
+              git add -A
+              GIT_AUTHOR_NAME=fork-sync GIT_AUTHOR_EMAIL=fork-sync@users.noreply.github.com \
+              GIT_COMMITTER_NAME=fork-sync GIT_COMMITTER_EMAIL=fork-sync@users.noreply.github.com \
+                git commit -q --no-verify -m "Sync upstream ${upstream_sha:0:9} into tools: UNRESOLVED CONFLICTS" -m "$conflicts"
+            fi
+            if [ -z "$wf" ] && git push origin "HEAD:refs/heads/${branch}"; then
+              pushed=yes
+            fi
+          fi
+
+          {
+            echo "## Upstream sync needs attention"
+            echo
+            echo "- Run: ${run_url}"
+            echo "- Upstream: \`${UPSTREAM_REPO}@${upstream_sha:0:9}\`; tools before: \`${tools_sha:0:9}\`"
+            echo "- Merge: **${status:-merge job failed}**; verify: **${{ needs.verify.result }}**; publish: **${{ needs.publish.result }}**"
+            if [ "$pushed" = yes ]; then echo "- Sync branch: \`${branch}\`"; fi
+            if [ -n "$wf" ]; then
+              echo "- Upstream changed workflow files (\`${wf}\`), which GITHUB_TOKEN may not push. If verify is green, publish by hand:"
+              echo '  `git fetch upstream && git switch tools && git merge upstream/main && git push origin tools upstream/main:main`'
+            fi
+            if [ "$status" = conflict ]; then
+              echo
+              echo "### Conflicted files"
+              echo '```'; echo "$conflicts"; echo '```'
+              echo "Resolve on \`${branch}\` (or redo the merge locally), keeping to FORK.md's layering rules, then fast-forward tools."
+            fi
+            for f in fork-sync-out/*.failures.md; do [ -f "$f" ] && { echo; cat "$f"; }; done
+            echo
+            echo "_Filed by .github/workflows/fork-sync-upstream.yml. The repair stage is a disabled stub, so this needs a person._"
+          } > "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+          title="[fork-sync] upstream sync needs attention"
+          filed=no
+          existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$report" && filed="comment on issue #$existing"
+          elif gh issue create --title "$title" --body-file "$report" >/dev/null 2>&1; then
+            filed="new issue"
+          elif [ "$pushed" = yes ] && gh pr create --draft --base "$TOOLS_BRANCH" --head "$branch" --title "$title ($branch)" --body-file "$report" >/dev/null 2>&1; then
+            filed="draft PR"
+          fi
+          if [ "$filed" = no ]; then
+            echo "::warning::Could not open an issue or draft PR (Issues are off on this fork, and Actions may not create PRs). The report is in this run's summary."
+          else
+            echo "Report filed as: $filed"
+          fi
+          exit 1

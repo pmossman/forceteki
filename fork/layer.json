@@ -1,0 +1,12 @@
+{
+    "about": "Machine-readable registry of the fork layer. FORK.md explains the rules; fork/check-layer.mjs enforces them.",
+    "upstream": "https://github.com/SWU-Karabast/forceteki",
+    "ourPaths": [
+        "FORK.md",
+        "fork/**",
+        "server/**/fork/**",
+        "test/**/fork/**",
+        ".github/workflows/fork-*.yml"
+    ],
+    "hookPoints": []
+}
