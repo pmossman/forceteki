@@ -121,6 +121,9 @@ export interface ISetupDsl {
 export interface IPostSetupAdjustments {
     activePlayer?: Seat;
     epicActionUsed?: Seat[];
+
+    /** token upgrades (Shield, Experience, ...) on a deployed leader: the DSL can only put them on arena units */
+    leaderTokenUpgrades?: Partial<Record<Seat, string[]>>;
 }
 
 export interface IResolvedPosition {

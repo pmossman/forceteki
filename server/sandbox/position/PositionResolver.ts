@@ -254,6 +254,11 @@ function capturedToDsl(index: SandboxCardIndex, captured: ICapturedEntry, captor
     return internalName;
 }
 
+function isTokenName(index: SandboxCardIndex, name: string): boolean {
+    const result = index.lookup(name);
+    return result.ok === true && result.entry.isToken;
+}
+
 function internalNameOf(index: SandboxCardIndex, name: string): string {
     const result = index.lookup(name);
     return result.ok === true ? result.entry.internalName : name;
@@ -272,8 +277,10 @@ function playerToDsl(index: SandboxCardIndex, seat: Seat, player: IPlayerPositio
         if (leader.damage) {
             leaderDsl.damage = leader.damage;
         }
-        if (leader.upgrades?.length) {
-            leaderDsl.upgrades = leader.upgrades.map((upgrade) => upgradeToDsl(index, upgrade, seat));
+        // token upgrades on a leader are applied after setup (the harness only creates tokens for arena units)
+        const nonTokenUpgrades = (leader.upgrades ?? []).filter((upgrade) => !isTokenName(index, upgrade.card));
+        if (nonTokenUpgrades.length) {
+            leaderDsl.upgrades = nonTokenUpgrades.map((upgrade) => upgradeToDsl(index, upgrade, seat));
         }
         if (leader.captured?.length) {
             leaderDsl.capturedUnits = leader.captured.map((captured) => capturedToDsl(index, captured, seat));
@@ -398,6 +405,14 @@ export function resolvePosition(index: SandboxCardIndex, input: { text?: string;
     const epicUsed = (['p1', 'p2'] as const).filter((seat) => canonical[seat].leader?.epicActionUsed && !canonical[seat].leader?.deployed);
     if (epicUsed.length > 0) {
         adjustments.epicActionUsed = epicUsed;
+    }
+    for (const seat of ['p1', 'p2'] as const) {
+        const leader = canonical[seat].leader;
+        const tokens = leader?.deployed ? (leader.upgrades ?? []).filter((upgrade) => isTokenName(index, upgrade.card)) : [];
+        if (tokens.length > 0) {
+            adjustments.leaderTokenUpgrades = adjustments.leaderTokenUpgrades ?? {};
+            adjustments.leaderTokenUpgrades[seat] = tokens.map((upgrade) => internalNameOf(index, upgrade.card));
+        }
     }
 
     return {

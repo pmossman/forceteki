@@ -78,6 +78,16 @@ export class HarnessGameLoader implements ISandboxGameLoader {
             }
         }
 
+        for (const seat of ['p1', 'p2'] as const) {
+            const tokens = adjustments.leaderTokenUpgrades?.[seat];
+            if (tokens?.length) {
+                const wrapperForSeat = seat === 'p1' ? ctx.player1 : ctx.player2;
+                const leader: any = game.getPlayerById(sandboxPlayerIds[seat]).getAllDeckLeaders()[0];
+                wrapperForSeat.setCardUpgrades(leader, tokens);
+                changed = true;
+            }
+        }
+
         if (adjustments.activePlayer) {
             const wrapperForSeat = adjustments.activePlayer === 'p1' ? ctx.player1 : ctx.player2;
             wrapperForSeat.setActivePlayer();
