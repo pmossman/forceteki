@@ -21,7 +21,14 @@ export interface ISandboxAdapterDeps {
     testGameBuilder: any;
 }
 
+// built once per card data source (servers in tests are constructed many times)
+const indexCache = new WeakMap<object, SandboxCardIndex>();
+
 function buildCardIndex(cardDataGetter: any): SandboxCardIndex {
+    const cached = indexCache.get(cardDataGetter);
+    if (cached) {
+        return cached;
+    }
     const cards: ICardDataJson[] = [];
     for (const id of cardDataGetter.cardIds as string[]) {
         try {
@@ -30,8 +37,12 @@ function buildCardIndex(cardDataGetter: any): SandboxCardIndex {
             // skip unreadable card data
         }
     }
-    return SandboxCardIndex.fromCardData(cards);
+    const index = SandboxCardIndex.fromCardData(cards);
+    indexCache.set(cardDataGetter, index);
+    return index;
 }
+
+let cardIndexFileWritten = false;
 
 function safeAck(ack: unknown): (result: unknown) => void {
     return typeof ack === 'function' ? (ack as (result: unknown) => void) : () => undefined;
@@ -44,12 +55,15 @@ export function attachSandbox(app: Express, io: IOServer, deps: ISandboxAdapterD
     const indexJson = index.toJson();
 
     // static artifact for the client (and a future static site): build/sandbox/card-index.json
-    try {
-        const outDir = path.resolve(__dirname, '../../../sandbox');
-        fs.mkdirSync(outDir, { recursive: true });
-        fs.writeFileSync(path.join(outDir, 'card-index.json'), JSON.stringify(indexJson));
-    } catch (error) {
-        console.warn('SANDBOX: could not write card-index.json', error);
+    if (!cardIndexFileWritten) {
+        cardIndexFileWritten = true;
+        try {
+            const outDir = path.resolve(__dirname, '../../../sandbox');
+            fs.mkdirSync(outDir, { recursive: true });
+            fs.writeFileSync(path.join(outDir, 'card-index.json'), JSON.stringify(indexJson));
+        } catch (error) {
+            console.warn('SANDBOX: could not write card-index.json', error);
+        }
     }
 
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -110,5 +124,6 @@ export function attachSandbox(app: Express, io: IOServer, deps: ISandboxAdapterD
         socket.on('disconnect', () => unsubscribe());
     });
 
+    // eslint-disable-next-line no-console
     console.log(`SANDBOX: ready (${index.entries.length} cards indexed in ${Date.now() - started}ms): HTTP /api/sandbox/*, socket.io namespace /sandbox`);
 }

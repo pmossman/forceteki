@@ -94,7 +94,6 @@ export function buildGodView(views: { p1: any; p2: any }, deciders: Seat[]): any
             target.topCardOfDeck = own.topCardOfDeck;
         }
     }
-    god.playerUpdate = 'god';
     return god;
 }
 
