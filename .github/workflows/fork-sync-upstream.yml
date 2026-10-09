@@ -1,14 +1,15 @@
 # Fork layer file, not an upstream file. Keeps `tools` in step with SWU-Karabast/forceteki.
 # Policy and manual steps: FORK.md, "Sync policy".
 #
-#   merge    fetch upstream, fast-forward the `main` mirror, rebuild the merge of upstream/main into tools
-#   verify   rebuild the same merge commit in each job and run upstream's checks plus the fork layer check
+#   merge    fetch upstream, fast-forward the `main` mirror, check the fork layer, merge upstream/main into tools
+#   verify   rebuild the same merge commit in each job and run upstream's own CI checks on it
 #   repair   DISABLED STUB for the code factory (never runs)
 #   publish  green: fast-forward `tools` to the tested merge commit
 #   report   anything not green: push a sync/<date>-run<N> branch, open or update an issue (or a draft PR), fail the run
 #
 # Needs no secrets. GITHUB_TOKEN cannot push commits that change .github/workflows/*, so a sync that brings in
 # an upstream workflow change is tested here but has to be pushed by hand (the report says how).
+# Jobs that run upstream code (verify) get a read-only token that isn't left on disk.
 name: fork-sync-upstream
 
 on:
@@ -20,11 +21,12 @@ on:
         description: 'Update tools and main when green. Off = dry run: test the merge, push nothing.'
         type: boolean
         default: true
+      upstream_ref:
+        description: 'Upstream ref to merge. Anything but main is always a dry run, e.g. refs/pull/1234/head previews an upstream PR against our layer.'
+        type: string
+        default: main
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: fork-sync-upstream
@@ -34,13 +36,16 @@ env:
   UPSTREAM_REPO: SWU-Karabast/forceteki
   TOOLS_BRANCH: tools
   MIRROR_BRANCH: main
-  PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+  PUBLISH: ${{ github.event_name == 'schedule' || (inputs.publish && (inputs.upstream_ref || 'main') == 'main') }}
 
 jobs:
   merge:
     name: Fetch upstream and merge
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write   # fast-forwarding main
     outputs:
       status: ${{ steps.merge.outputs.status }}
       tools_sha: ${{ steps.merge.outputs.tools_sha }}
@@ -55,9 +60,17 @@ jobs:
           fetch-depth: 0
 
       - name: Fetch upstream
+        id: fetch
         run: |
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
           git fetch --no-tags upstream main
+          if [ "$UPSTREAM_REF" = main ]; then
+            echo "sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
+          else
+            git fetch --no-tags upstream "$UPSTREAM_REF"
+            echo "sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+            echo "Preview of upstream ref ${UPSTREAM_REF} ($(git rev-parse --short FETCH_HEAD)); dry run, nothing will be pushed." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Fast-forward the main mirror
         run: |
@@ -75,11 +88,14 @@ jobs:
             git push origin "${up}:refs/heads/${MIRROR_BRANCH}"
           fi
 
-      - name: Merge upstream/main into tools
+      - name: Fork layer check (tools as it stands)
+        run: node fork/check-layer.mjs --upstream upstream/main
+
+      - name: Merge upstream into tools
         id: merge
         run: |
           tools_sha=$(git rev-parse HEAD)
-          upstream_sha=$(git rev-parse upstream/main)
+          upstream_sha="${{ steps.fetch.outputs.sha }}"
           when=$(date -u +%Y-%m-%dT%H:%M:%S+0000)
           { echo "tools_sha=$tools_sha"; echo "upstream_sha=$upstream_sha"; echo "when=$when"; } >> "$GITHUB_OUTPUT"
           if git merge-base --is-ancestor "$upstream_sha" "$tools_sha"; then
@@ -99,16 +115,14 @@ jobs:
             { echo "Merge of upstream ${upstream_sha:0:9} into tools ${tools_sha:0:9} has conflicts:"; echo '```'; echo "$out"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Fork layer check
-        if: steps.merge.outputs.status == 'merged'
-        run: node fork/check-layer.mjs --upstream upstream/main
-
   verify:
     name: verify (${{ matrix.check }})
     needs: merge
     if: needs.merge.outputs.status == 'merged'
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -118,6 +132,7 @@ jobs:
         with:
           ref: ${{ needs.merge.outputs.tools_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Rebuild the merge commit
         run: |
@@ -203,6 +218,7 @@ jobs:
     needs: [merge, verify]
     if: ${{ false }}
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - run: echo "The repair stage is a disabled stub." && exit 1
 
@@ -212,6 +228,8 @@ jobs:
     if: needs.merge.outputs.status == 'merged' && needs.verify.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write   # fast-forwarding tools
     steps:
       - uses: actions/checkout@v6
         with:
@@ -225,7 +243,7 @@ jobs:
           sha=$(bash fork/sync-merge.sh "${{ needs.merge.outputs.tools_sha }}" "${{ needs.merge.outputs.upstream_sha }}" "${{ needs.merge.outputs.when }}")
           test "$sha" = "${{ needs.merge.outputs.merge_sha }}"
           if [ "$PUBLISH" != "true" ]; then
-            echo "Dry run: would fast-forward ${TOOLS_BRANCH} to ${sha:0:9}" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Dry run (upstream ref ${UPSTREAM_REF}): would fast-forward ${TOOLS_BRANCH} to ${sha:0:9}" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -n "${{ needs.merge.outputs.workflow_files }}" ]; then
@@ -247,6 +265,10 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write        # pushing the sync branch
+      issues: write          # the report issue
+      pull-requests: write   # or a draft PR, if Issues are off
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -270,6 +292,8 @@ jobs:
           wf="${{ needs.merge.outputs.workflow_files }}"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           branch="sync/$(date -u +%Y-%m-%d)-run${GITHUB_RUN_NUMBER}"
+          # A preview of a non-main upstream ref only reports in the run summary: no branch, no issue.
+          preview=no; [ "$UPSTREAM_REF" != main ] && preview=yes
           report=fork-sync-out/report.md
           mkdir -p fork-sync-out
 
@@ -287,7 +311,7 @@ jobs:
               GIT_COMMITTER_NAME=fork-sync GIT_COMMITTER_EMAIL=fork-sync@users.noreply.github.com \
                 git commit -q --no-verify -m "Sync upstream ${upstream_sha:0:9} into tools: UNRESOLVED CONFLICTS" -m "$conflicts"
             fi
-            if [ -z "$wf" ] && git push origin "HEAD:refs/heads/${branch}"; then
+            if [ "$preview" = no ] && [ -z "$wf" ] && git push origin "HEAD:refs/heads/${branch}"; then
               pushed=yes
             fi
           fi
@@ -296,7 +320,7 @@ jobs:
             echo "## Upstream sync needs attention"
             echo
             echo "- Run: ${run_url}"
-            echo "- Upstream: \`${UPSTREAM_REPO}@${upstream_sha:0:9}\`; tools before: \`${tools_sha:0:9}\`"
+            echo "- Upstream: \`${UPSTREAM_REPO}@${upstream_sha:0:9}\` (ref \`${UPSTREAM_REF}\`); tools before: \`${tools_sha:0:9}\`"
             echo "- Merge: **${status:-merge job failed}**; verify: **${{ needs.verify.result }}**; publish: **${{ needs.publish.result }}**"
             if [ "$pushed" = yes ]; then echo "- Sync branch: \`${branch}\`"; fi
             if [ -n "$wf" ]; then
@@ -315,6 +339,10 @@ jobs:
           } > "$report"
           cat "$report" >> "$GITHUB_STEP_SUMMARY"
 
+          if [ "$preview" = yes ]; then
+            echo "Preview run: the report above is in the run summary only."
+            exit 1
+          fi
           title="[fork-sync] upstream sync needs attention"
           filed=no
           existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number' 2>/dev/null || true)

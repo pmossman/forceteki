@@ -33,15 +33,17 @@ Rules:
 ## Sync policy
 
 `.github/workflows/fork-sync-upstream.yml` runs daily at 09:23 UTC and on demand (Actions tab, "Run workflow"; untick
-"publish" for a dry run that pushes nothing).
+"publish" for a dry run that pushes nothing). A manual run can also preview an upstream ref other than `main`, such as
+`refs/pull/1234/head`, to see whether an upstream PR would break our layer before it lands; previews are always dry runs
+and report only in the run summary.
 
 1. Fetch `SWU-Karabast/forceteki` `main`.
 2. Fast-forward our `main` to it, if `main` is a pure ancestor. Otherwise leave `main` alone and say so.
-3. If `tools` already contains upstream, stop.
+3. Run `node fork/check-layer.mjs` on `tools` as it stands. If `tools` already contains upstream, stop.
 4. Merge `upstream/main` into `tools` with `fork/sync-merge.sh`. The merge is deterministic (fixed author, committer
    and date), so every job rebuilds the same commit sha and the commit that gets published is exactly the one that was
    tested.
-5. Run `node fork/check-layer.mjs`, then upstream's own CI checks in parallel jobs: `eslint`, `validate-cards`,
+5. Run upstream's own CI checks on the merge commit, in parallel jobs: `eslint`, `validate-cards`,
    `test-parallel` and `test-parallel-undo`. A test job that fails is re-run once without rebuilding; a pass on the
    retry counts as green and the flaky specs are listed as a warning.
 6. All green: fast-forward `tools` to the merge commit. This is a plain push, rejected if `tools` moved meanwhile.
@@ -50,7 +52,8 @@ Rules:
    on the open one). If Issues are off, it tries a draft PR from the sync branch into `tools`. The run is marked failed
    either way, and the run summary always holds the full report.
 
-The workflow needs no secrets. Its token is the run's `GITHUB_TOKEN` (contents, issues and pull-requests write).
+The workflow needs no secrets. Its token is the run's `GITHUB_TOKEN`, scoped per job: the jobs that run upstream code
+get read-only access and don't keep the token on disk; only the jobs that push or file the report get write access.
 
 What the policy is:
 - We take all of upstream, always. No cherry-picking, skipping or reverting upstream commits on `tools`. If upstream
@@ -110,7 +113,7 @@ Every line we touch in an upstream file is a line that can conflict at the next 
 
 `node fork/check-layer.mjs` enforces rules 1 and 2. It lists every file that differs from upstream and fails if one is
 outside `ourPaths` and not a registered hook file, or if a registered hook file lacks its marker. The sync workflow
-runs it on every merge. With `--base A --head B` it checks only the files changed between two commits, which is the
+runs it on every sync. With `--base A --head B` it checks only the files changed between two commits, which is the
 diff-scope gate a repair must pass.
 
 Why this matters: automatic repair after an upstream change is only tractable if the area it can break is small and
